@@ -5,7 +5,7 @@ use env_logger;
 use log_resolver_rs::{dao::post, util::IsEmpty};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::{collections::HashMap, error::Error, hash::Hash, os::macos::raw};
+use std::{collections::HashMap, error::Error, fmt::Display, hash::Hash, os::macos::raw};
 
 fn main() {
     env_logger::init();
@@ -51,6 +51,19 @@ enum Header {
     ENCODING,
 }
 
+#[derive(Debug)]
+pub enum ParseError{
+    Error
+}
+
+impl Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ParseError")
+    }
+}
+
+impl Error for ParseError {}
+
 fn parse_log(raw_log: Vec<u8>) -> Result<LogHeader, Box<dyn Error>> {
     let delimiter = b"]]";
     let delimiter_pos = raw_log
@@ -62,7 +75,7 @@ fn parse_log(raw_log: Vec<u8>) -> Result<LogHeader, Box<dyn Error>> {
             let content = &raw_log[pos + delimiter.len()..];
             (header, content)
         }
-        None => return Err(Error),
+        None => return Err(ParseError::Error),
     };
 
     // 2. 解析头部 (保证是 ASCII)
