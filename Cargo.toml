@@ -13,3 +13,6 @@ diesel = { version = "2.2.10", features = ["mysql"] }
 # mysqlclient-sys = { version = "0.4", features = ["bundled"] }
 dotenvy = "0.15"
 serde = { version = "1.0.219", features = ["derive"] }
+env_logger = "0.11.8"
+log = "0.4.27"
+encoding_rs = "0.8.35"
