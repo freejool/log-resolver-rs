@@ -6,4 +6,4 @@ pub mod models;
 pub mod schema;
 pub mod util;
 
-
+pub mod error;

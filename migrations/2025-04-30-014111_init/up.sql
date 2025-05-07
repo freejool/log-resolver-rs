@@ -16,7 +16,7 @@ create table if not exists subsys_log_parser
     subsys_code        varchar(255)    not null, -- 外键
     log_parser_rule_id bigint unsigned not null, -- 外键
     file_name          varchar(255)    null,     -- 正则表达式，空则匹配所有
-    status             tinyint         not null, -- 是否启用，1为启用，0为禁用
+    status             tinyint(1)      not null, -- 是否启用，1为启用，0为禁用
     log_split          varchar(255)    null,     -- 日志分割正则，将在每一个match的开头位置分割
     source_topic       varchar(255)    not null, -- 将发往的topic
     constraint subsys_log_parser_uindex unique (log_parser_rule_id, file_name, subsys_code)
@@ -27,7 +27,7 @@ create table if not exists log_parser_rule
 (                                   --
     id           bigint unsigned auto_increment primary key,
     name         varchar(255) null, --
-    status       tinyint      not null,
+    status       tinyint(1)   not null,
     chinese_name varchar(255) null  --
 );
 insert into log_parser_rule value (1, 'default', true, null);
@@ -51,6 +51,7 @@ create table if not exists log_parser_field
     type               int             not null, -- 正则表达式 0:常规,10:日期
     format_pattern     varchar(255)    null,     -- 和type对应，如果是10则是时间格式
     default_val        varchar(1024)   null,     -- 默认值
-    is_sensitive       tinyint         null
+    is_sensitive       tinyint(1)      null
 );
 insert into log_parser_field value (1, 1, null, 'dateTime', 10, 'yyyy-MM-dd hh:mm:ss.SSS', null, null);
+insert into log_parser_field value (2, 1, null, 'level', 0, null, null, null);

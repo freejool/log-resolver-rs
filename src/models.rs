@@ -1,8 +1,6 @@
-
+use crate::schema;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::schema;
-
 
 #[derive(Queryable, Selectable, Debug, Clone, Serialize, Deserialize)]
 #[diesel(table_name = schema::sys_subsys_config)]
@@ -18,7 +16,6 @@ pub struct SysSubsysConfig {
     pub subsys_name: Option<String>,
 }
 
-
 #[derive(Queryable, Selectable, Debug, Clone, Serialize, Deserialize)]
 #[diesel(table_name = schema::subsys_log_parser)]
 #[diesel(check_for_backend(diesel::mysql::Mysql))]
@@ -33,7 +30,6 @@ pub struct SubsysLogParser {
     pub log_split: Option<String>,
     pub source_topic: String,
 }
-
 
 #[derive(Queryable, Selectable, Debug, Clone, Serialize, Deserialize)]
 #[diesel(table_name = schema::log_parser_rule)]

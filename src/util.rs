@@ -6,7 +6,7 @@ pub trait IsEmpty<T> {
     fn is_empty(t: T) -> bool;
 }
 
-impl IsEmpty<String> for String{
+impl IsEmpty<String> for String {
     fn is_empty(t: String) -> bool {
         todo!()
     }

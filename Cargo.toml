@@ -16,3 +16,4 @@ serde = { version = "1.0.219", features = ["derive"] }
 env_logger = "0.11.8"
 log = "0.4.27"
 encoding_rs = "0.8.35"
+anyhow = "1.0.98"

@@ -1,3 +1,1 @@
-struct Configuration{
-    
-}
+struct Configuration {}
