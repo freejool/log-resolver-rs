@@ -1,11 +1,14 @@
 use anyhow::anyhow;
-use diesel::sql_types::ops::Mul;
 use diesel::MysqlConnection;
+use diesel::sql_types::ops::Mul;
 use encoding_rs;
 use encoding_rs::Encoding;
 use env_logger;
 use log::{info, warn};
-use log_resolver_rs::dao::{subsys_log_parser_config_dao, sys_subsys_config_dao};
+use log_resolver_rs::dao::{
+    log_parser_pattern_dao, log_parser_rule_dao, subsys_log_parser_config_dao,
+    sys_subsys_config_dao,
+};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::borrow::Cow;
@@ -16,10 +19,10 @@ fn main() {
     dotenvy::dotenv().ok();
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let mut context = ApplicationContext {
-        conn: <diesel::MysqlConnection as diesel::Connection>::establish(&database_url)
+    let mut context = ApplicationContext::from(
+        <diesel::MysqlConnection as diesel::Connection>::establish(&database_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", database_url)),
-    };
+    );
 
     // loop {
     let records: Vec<Record> = poll_records().unwrap();
@@ -64,7 +67,10 @@ pub struct LogHeader {
     pub attr: HashMap<String, String>,
 }
 
-fn parse_log<'a>(context: &mut ApplicationContext, raw_log: &'a Vec<u8>) -> anyhow::Result<ParsedLog<'a>> {
+fn parse_log<'a>(
+    context: &mut ApplicationContext,
+    raw_log: &'a Vec<u8>,
+) -> anyhow::Result<ParsedLog<'a>> {
     let conn = context.conn();
     let delimiter = b"]]";
     let delimiter_pos = raw_log
@@ -104,8 +110,25 @@ fn parse_log<'a>(context: &mut ApplicationContext, raw_log: &'a Vec<u8>) -> anyh
         warn!("Error while decoding log content from {subsys_code}");
     }
     log::debug!("{subsys_code}");
-    let sys_subsys_config = sys_subsys_config_dao::query_by_subsys_code(conn, &subsys_code).unwrap();
-    let subsys_log_parser_config = subsys_log_parser_config_dao::query_by_subsys_code(conn, &subsys_code).unwrap();
+    let sys_subsys_config =
+        sys_subsys_config_dao::query_by_subsys_code(conn, &subsys_code).unwrap();
+    let subsys_log_parser_config_list =
+        subsys_log_parser_config_dao::query_by_subsys_code(conn, &subsys_code);
+    for subsys_log_parser_config in subsys_log_parser_config_list {
+        let parser_rule_id = subsys_log_parser_config.log_parser_rule_id;
+        if let Some(log_parser_rule) = log_parser_rule_dao::query_by_id(conn, parser_rule_id) {
+            let log_parser_pattern_list =
+                log_parser_pattern_dao::query_by_log_parser_rule_id(conn, parser_rule_id);
+            for log_parser_pattern in log_parser_pattern_list {
+                log::info!("{:?}", log_parser_pattern);
+                let pattern = regex::Regex::new(
+                    log_parser_pattern.pattern.unwrap_or_default().as_str(),
+                );
+            }
+        }
+
+        log::info!("{:?}", subsys_log_parser_config);
+    }
     headers.insert("sys_code".to_string(), sys_subsys_config.sys_code);
 
     Ok(ParsedLog {
@@ -152,7 +175,9 @@ fn poll_records() -> anyhow::Result<Vec<Record>> {
     let records = vec![
         Record {
             key: "".to_string(),
-            value: Vec::from("[[subsyscode=SUBSYS_TEST][encode=utf-8]]2025-01-01 22:22:22.222 |INFO| MSG"),
+            value: Vec::from(
+                "[[subsyscode=SUBSYS_TEST][encode=utf-8]]2025-01-01 22:22:22.222 |INFO| MSG",
+            ),
             timestamp: 1000000,
         },
         // Record {
@@ -181,7 +206,11 @@ pub struct ApplicationContext {
 }
 
 impl ApplicationContext {
-    pub fn conn(&mut self)-> &mut MysqlConnection {
+    pub fn conn(&mut self) -> &mut MysqlConnection {
         &mut self.conn
+    }
+
+    pub fn from(conn: MysqlConnection) -> Self {
+        Self { conn }
     }
 }
