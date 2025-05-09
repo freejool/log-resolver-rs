@@ -6,13 +6,14 @@ use encoding_rs::Encoding;
 use env_logger;
 use log::{info, warn};
 use log_resolver_rs::dao::{
-    log_parser_pattern_dao, log_parser_rule_dao, subsys_log_parser_config_dao,
-    sys_subsys_config_dao,
+    log_parser_field_dao, log_parser_pattern_dao, log_parser_rule_dao,
+    subsys_log_parser_config_dao, sys_subsys_config_dao,
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::hash::Hash;
 
 fn main() {
     env_logger::init();
@@ -105,6 +106,12 @@ fn parse_log<'a>(
     // 第二个元素是实际使用的编码 (可能与请求的不同，例如 BOM 检测)
     // 第三个元素表示是否有解码错误
     let (decoded_log_cow, actual_encoding, had_errors) = encoding.decode(log_content_bytes);
+    log::debug!(
+        "Decoded log: {:?}, encoding: {:?}, had_errors: {:?}",
+        decoded_log_cow,
+        actual_encoding,
+        had_errors
+    );
     let subsys_code = get_subsys_code(&headers).unwrap_or("null".to_string());
     if had_errors {
         warn!("Error while decoding log content from {subsys_code}");
@@ -119,11 +126,30 @@ fn parse_log<'a>(
         if let Some(log_parser_rule) = log_parser_rule_dao::query_by_id(conn, parser_rule_id) {
             let log_parser_pattern_list =
                 log_parser_pattern_dao::query_by_log_parser_rule_id(conn, parser_rule_id);
+            let log_parser_field_list =
+                log_parser_field_dao::query_by_log_parser_rule_id(conn, parser_rule_id);
             for log_parser_pattern in log_parser_pattern_list {
-                log::info!("{:?}", log_parser_pattern);
-                let pattern = regex::Regex::new(
-                    log_parser_pattern.pattern.unwrap_or_default().as_str(),
-                );
+                let pattern =
+                    regex::Regex::new(log_parser_pattern.pattern.unwrap_or_default().as_str())
+                        .unwrap();
+                log::info!("{}", pattern);
+                if let Some(captures) = pattern.captures(&decoded_log_cow) {
+                    log::debug!(
+                        "  整体匹配到的内容: \"{}\"",
+                        captures.get(0).map_or("", |m| m.as_str())
+                    );
+                    let mut named_captures = HashMap::<String, String>::new();
+                    for group_name_option in pattern.capture_names() {
+                        if let Some(group_name) = group_name_option {
+                            // 确保是已命名的组
+                            let group_value = captures.name(group_name);
+                            named_captures.insert(
+                                group_name.to_string(),
+                                group_value.map_or(String::new(), |m| m.as_str().to_string()),
+                            );
+                        }
+                    }
+                }
             }
         }
 

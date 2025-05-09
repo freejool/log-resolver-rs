@@ -40,7 +40,7 @@ create table if not exists log_parser_pattern
     pattern            text            null      -- 正则，所有named capture应有对应的field
 );
 insert into log_parser_pattern value (1, 1, null,
-                                      '(?P<dateTime>^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3,6})\s*|\s*(?P<level>INFO|ERROR|DEBUG)|$');
+                                      '^(?P<dateTime>\\d{4}-\\d{2}-\\d{2}\\s\\d{2}:\\d{2}:\\d{2}\\.\\d{3,6})\\s*\\|\\s*(?P<level>INFO|ERROR|DEBUG)\\s*\\|(?P<message>.*)$');
 
 create table if not exists log_parser_field
 (                                                -- 自定义的字段解析
