@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use chrono::prelude::*;
 use diesel::MysqlConnection;
+use diesel::sql_types::ops::Mul;
 use encoding_rs;
 use encoding_rs::Encoding;
 use env_logger;
@@ -11,6 +12,7 @@ use log_resolver_rs::dao::{
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::any;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -36,7 +38,7 @@ fn main() {
 }
 static MAIN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)^\[\[(.*?)\]\](.*)$").unwrap());
 static KV_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^=\[\]]+)=([^\[\]]*)\]").unwrap());
-
+static DELIMITER: &'static [u8] = b"]]";
 fn parse_header_kv(header_content: &str) -> HashMap<String, String> {
     let mut attributes = HashMap::new();
     for kv_caps in KV_RE.captures_iter(header_content) {
@@ -60,7 +62,7 @@ pub struct ParsedLog<'a> {
     pub log_content: Cow<'a, str>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogHeader {
     pub subsys_code: String,
     pub encode: &'static encoding_rs::Encoding,
@@ -70,154 +72,145 @@ pub struct LogHeader {
 #[derive(Debug)]
 pub struct Log<'a> {
     pub date_time: DateTime<Local>,
-    pub subsys_code: String,
-    pub attr: HashMap<String, String>,
+    pub log_header: LogHeader,
     pub log_content: Cow<'a, str>,
 }
 
-impl Log<'_> {
-    fn new() -> Self {
-        Log {
-            date_time: Local::now(),
-            subsys_code: "".to_string(),
-            attr: HashMap::new(),
-            log_content: Cow::Borrowed(""),
-        }
-    }
+impl LogHeader {
+    fn from_bytes(header_bytes: &[u8]) -> anyhow::Result<Self> {
+        let header_str = std::str::from_utf8(header_bytes)?; // 如果非 ASCII 会在此处报错
+        log::debug!("header: {:?}", header_str);
+        let headers = parse_header_kv(header_str);
+        let encoding_label_opt = headers.get("encode").map(|s| s.to_string());
 
-    fn get_attr_mut(&mut self) -> HashMap<String, String> {
-        self.attr.clone()
-    }
+        let encoding_label = encoding_label_opt.as_deref().unwrap_or("UTF-8");
 
-    fn set_date_time(&mut self, date_time: DateTime<Local>) {
-        self.date_time = date_time;
+        let encoding = get_encoding_from_label(encoding_label).unwrap();
+
+        let subsys_code = get_subsys_code(&headers).unwrap_or("null".to_string());
+        log::debug!("{subsys_code}");
+
+        Ok(LogHeader {
+            subsys_code,
+            encode: encoding,
+            attr: headers,
+        })
     }
 }
-
 fn parse_log<'a>(
     context: &mut ApplicationContext,
     raw_log: &'a Vec<u8>,
-) -> anyhow::Result<ParsedLog<'a>> {
+) -> anyhow::Result<Vec<Log<'a>>> {
+    // 1: 找到头部和内容分隔符的位置
     let conn = context.conn();
-    let delimiter = b"]]";
     let delimiter_pos = raw_log
-        .windows(delimiter.len())
-        .position(|window| window == delimiter);
+        .windows(DELIMITER.len())
+        .position(|window| window == DELIMITER);
     let (header_bytes, log_content_bytes) = match delimiter_pos {
         Some(pos) => {
-            let header = &raw_log[..pos + delimiter.len()];
-            let content = &raw_log[pos + delimiter.len()..];
+            let header = &raw_log[..pos + DELIMITER.len()];
+            let content = &raw_log[pos + DELIMITER.len()..];
             (header, content)
         }
         None => return Err(anyhow!("log header delimiter not found")),
     };
 
-    // 2. 解析头部 (保证是 ASCII)
-    // 使用 from_utf8 验证并转换为 &str，因为 ASCII 是 UTF-8 的子集
-    let header_str = std::str::from_utf8(header_bytes)?; // 如果非 ASCII 会在此处报错
-    log::debug!("header: {:?}", header_str);
-    let mut headers = parse_header_kv(header_str);
+    // 2: 解析头部
+    let log_header = LogHeader::from_bytes(header_bytes)?;
 
-    // 3. 从头部获取编码信息 (假设 key 是 'encode')
-    let encoding_label_opt = headers.get("encode").map(|s| s.to_string()); // 克隆出来，避免生命周期问题
-
-    let encoding_label = encoding_label_opt.as_deref().unwrap_or("UTF-8"); // 默认 UTF-8
-
-    // 4. 根据标签获取编码器
-    let encoding = get_encoding_from_label(encoding_label).unwrap();
-
-    // 5. 使用获取到的编码解码日志原文
-    // decode() 返回 (Cow<'_, str>, &'static Encoding, bool)
-    // 第一个元素是解码后的字符串，可能是借用的也可能是拥有的 (Cow)
-    // 第二个元素是实际使用的编码 (可能与请求的不同，例如 BOM 检测)
-    // 第三个元素表示是否有解码错误
-    let (decoded_log_cow, actual_encoding, had_errors) = encoding.decode(log_content_bytes);
+    // 3: 解码日志字符串
+    let (decoded_log_cow, actual_encoding, had_errors) =
+        log_header.encode.decode(log_content_bytes);
     log::debug!(
         "Decoded log: {:?}, encoding: {:?}, had_errors: {:?}",
         decoded_log_cow,
         actual_encoding,
         had_errors
     );
-    let subsys_code = get_subsys_code(&headers).unwrap_or("null".to_string());
     if had_errors {
-        warn!("Error while decoding log content from {subsys_code}");
+        log::warn!(
+            "Error while decoding log content from {}",
+            log_header.subsys_code
+        );
     }
-    log::debug!("{subsys_code}");
+
     let sys_subsys_config =
-        sys_subsys_config_dao::query_by_subsys_code(conn, &subsys_code).unwrap();
+        sys_subsys_config_dao::query_by_subsys_code(conn, &log_header.subsys_code).unwrap();
     let subsys_log_parser_config_list =
-        subsys_log_parser_config_dao::query_by_subsys_code(conn, &subsys_code);
+        subsys_log_parser_config_dao::query_by_subsys_code(conn, &log_header.subsys_code);
+
+    // 可能配置多条解析规则，每条规则生成一个Log
     for subsys_log_parser_config in subsys_log_parser_config_list {
-        let parser_rule_id = subsys_log_parser_config.log_parser_rule_id;
-        if let Some(log_parser_rule) = log_parser_rule_dao::query_by_id(conn, parser_rule_id) {
-            let log_parser_pattern_list =
-                log_parser_pattern_dao::query_by_log_parser_rule_id(conn, parser_rule_id);
-            let log_parser_field_list =
-                log_parser_field_dao::query_by_log_parser_rule_id(conn, parser_rule_id);
-            for log_parser_pattern in log_parser_pattern_list {
-                let pattern =
-                    regex::Regex::new(log_parser_pattern.pattern.unwrap_or_default().as_str())
-                        .unwrap();
-                log::info!("{}", pattern);
-                if let Some(captures) = pattern.captures(&decoded_log_cow) {
-                    log::debug!(
-                        "  整体匹配到的内容: \"{}\"",
-                        captures.get(0).map_or("", |m| m.as_str())
-                    );
-                    let mut named_captures = HashMap::<String, String>::new();
-                    for group_name_option in pattern.capture_names() {
-                        if let Some(group_name) = group_name_option {
-                            let group_value = captures.name(group_name).unwrap();
-                            let log_parser_field = log_parser_field_dao::query_by_log_parser_rule_id_and_name_in_capture(conn, id, name_in_capture);
-                            if let Some(log_parser_field) = log_parser_field {
-                                match log_parser_field.type_ {
-                                    10 => {
-                                        let dateTime = chrono::DateTime::parse_from_str(
-                                            group_value.as_str(),
-                                            log_parser_field.format_pattern.unwrap().as_str(),
-                                        )?;
-                                        let log = Log {
-                                            date_time: dateTime.into(),
-                                            subsys_code: subsys_code,
-                                            attr: headers,
-                                            log_content: decoded_log_cow.into(),
-                                        };
-                                    }
-                                    0 => {
-                                        let log = Log {
-                                            date_time: Local::now(),
-                                            subsys_code: subsys_code,
-                                            attr: headers,
-                                            log_content: decoded_log_cow.into(),
-                                        };
-                                    }
-                                    t => {
-                                        anyhow::bail!("unsupported group type: {}", t);
-                                    }
-                                }
-                            }
-                            named_captures.insert(
-                                group_name.to_string(),
-                                group_value.map_or(String::new(), |m| m.as_str().to_string()),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        log::info!("{:?}", subsys_log_parser_config);
+        apply_parse_config(
+            conn,
+            &log_header,
+            &decoded_log_cow,
+            subsys_log_parser_config,
+        )?;
     }
-    headers.insert("sys_code".to_string(), sys_subsys_config.sys_code);
 
-    Ok(ParsedLog {
-        log_content: decoded_log_cow,
-        header: LogHeader {
-            encode: actual_encoding,
-            subsys_code,
-            attr: headers,
-        },
-    })
+    Ok(())
+}
+
+fn apply_parse_config(
+    conn: &mut MysqlConnection,
+    log_header: &LogHeader,
+    decoded_log_cow: &Cow<'_, str>,
+    subsys_log_parser_config: log_resolver_rs::models::SubsysLogParser,
+) -> Result<(), anyhow::Error> {
+    let parser_rule_id = subsys_log_parser_config.log_parser_rule_id;
+    // let log_parser_rule = log_parser_rule_dao::query_by_id(conn, parser_rule_id).unwrap();
+    let log_parser_pattern_list =
+        log_parser_pattern_dao::query_by_log_parser_rule_id(conn, parser_rule_id);
+    // 每个pattern都产生一个Log
+    let logs: Vec<Log<'_>> = log_parser_pattern_list
+        .into_iter()
+        .filter_map(|log_parser_pattern| {
+            let pattern =
+                regex::Regex::new(log_parser_pattern.pattern.unwrap_or_default().as_str()).ok()?;
+
+            pattern.captures(decoded_log_cow).map(|captures| {
+                let mut log = Log {
+                    date_time: Local::now(),
+                    log_header: log_header.clone(),
+                    log_content: decoded_log_cow.clone(),
+                };
+                // let mut attr = log.log_header.attr;
+
+                pattern.capture_names().flatten().for_each(|group_name| {
+                    let log_parser_field =
+                        log_parser_field_dao::query_by_log_parser_rule_id_and_name_in_capture(
+                            conn,
+                            parser_rule_id,
+                            group_name,
+                        )
+                        .unwrap();
+
+                    let group_value = captures.name(group_name).unwrap();
+                    match log_parser_field.type_ {
+                        10 => {
+                            chrono::DateTime::parse_from_str(
+                                group_value.as_str(),
+                                log_parser_field.format_pattern.unwrap().as_str(),
+                            )
+                            .map(|dt| log.date_time = dt.into())
+                            .ok();
+                        }
+                        0 => {
+                            log.log_header
+                                .attr
+                                .insert(group_name.to_string(), group_value.as_str().to_string());
+                        }
+                        _ => log::warn!("unsupported group type"),
+                    }
+                });
+
+                log
+            })
+        })
+        .collect();
+    log::info!("{:?}", subsys_log_parser_config);
+    Ok(())
 }
 
 fn get_subsys_code(headers: &HashMap<String, String>) -> Option<String> {
