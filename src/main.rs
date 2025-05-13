@@ -1,6 +1,6 @@
 use anyhow::anyhow;
+use chrono::prelude::*;
 use diesel::MysqlConnection;
-use diesel::sql_types::ops::Mul;
 use encoding_rs;
 use encoding_rs::Encoding;
 use env_logger;
@@ -13,7 +13,6 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::hash::Hash;
 
 fn main() {
     env_logger::init();
@@ -66,6 +65,33 @@ pub struct LogHeader {
     pub subsys_code: String,
     pub encode: &'static encoding_rs::Encoding,
     pub attr: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+pub struct Log<'a> {
+    pub date_time: DateTime<Local>,
+    pub subsys_code: String,
+    pub attr: HashMap<String, String>,
+    pub log_content: Cow<'a, str>,
+}
+
+impl Log<'_> {
+    fn new() -> Self {
+        Log {
+            date_time: Local::now(),
+            subsys_code: "".to_string(),
+            attr: HashMap::new(),
+            log_content: Cow::Borrowed(""),
+        }
+    }
+
+    fn get_attr_mut(&mut self) -> HashMap<String, String> {
+        self.attr.clone()
+    }
+
+    fn set_date_time(&mut self, date_time: DateTime<Local>) {
+        self.date_time = date_time;
+    }
 }
 
 fn parse_log<'a>(
@@ -141,8 +167,35 @@ fn parse_log<'a>(
                     let mut named_captures = HashMap::<String, String>::new();
                     for group_name_option in pattern.capture_names() {
                         if let Some(group_name) = group_name_option {
-                            // 确保是已命名的组
-                            let group_value = captures.name(group_name);
+                            let group_value = captures.name(group_name).unwrap();
+                            let log_parser_field = log_parser_field_dao::query_by_log_parser_rule_id_and_name_in_capture(conn, id, name_in_capture);
+                            if let Some(log_parser_field) = log_parser_field {
+                                match log_parser_field.type_ {
+                                    10 => {
+                                        let dateTime = chrono::DateTime::parse_from_str(
+                                            group_value.as_str(),
+                                            log_parser_field.format_pattern.unwrap().as_str(),
+                                        )?;
+                                        let log = Log {
+                                            date_time: dateTime.into(),
+                                            subsys_code: subsys_code,
+                                            attr: headers,
+                                            log_content: decoded_log_cow.into(),
+                                        };
+                                    }
+                                    0 => {
+                                        let log = Log {
+                                            date_time: Local::now(),
+                                            subsys_code: subsys_code,
+                                            attr: headers,
+                                            log_content: decoded_log_cow.into(),
+                                        };
+                                    }
+                                    t => {
+                                        anyhow::bail!("unsupported group type: {}", t);
+                                    }
+                                }
+                            }
                             named_captures.insert(
                                 group_name.to_string(),
                                 group_value.map_or(String::new(), |m| m.as_str().to_string()),
