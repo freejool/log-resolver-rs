@@ -16,7 +16,7 @@ use std::any;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     env_logger::init();
     dotenvy::dotenv().ok();
 
@@ -31,10 +31,10 @@ fn main() {
     log::info!("{}", records.len());
     for record in records {
         log::info!("{} {}", record.key, String::from_utf8_lossy(&record.value));
-        let log_header = parse_log(&mut context, &record.value);
-        log::info!("{:?}", log_header);
+        let logs = parse_log(&mut context, &record.value)?;
+        log::debug!("{logs:?}");
     }
-    // }
+    Ok(())
 }
 static MAIN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)^\[\[(.*?)\]\](.*)$").unwrap());
 static KV_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^=\[\]]+)=([^\[\]]*)\]").unwrap());
@@ -139,25 +139,29 @@ fn parse_log<'a>(
     let subsys_log_parser_config_list =
         subsys_log_parser_config_dao::query_by_subsys_code(conn, &log_header.subsys_code);
 
-    // 可能配置多条解析规则，每条规则生成一个Log
-    for subsys_log_parser_config in subsys_log_parser_config_list {
-        apply_parse_config(
-            conn,
-            &log_header,
-            &decoded_log_cow,
-            subsys_log_parser_config,
-        )?;
-    }
+    let logs: anyhow::Result<Vec<Log<'_>>> = subsys_log_parser_config_list.into_iter().try_fold(
+        vec![],
+        |mut v, subsys_log_parser_config| {
+            let logs = apply_parse_config(
+                conn,
+                &log_header,
+                &decoded_log_cow,
+                subsys_log_parser_config,
+            )?;
+            v.extend(logs);
+            Ok(v)
+        },
+    );
 
-    Ok(())
+    logs
 }
 
-fn apply_parse_config(
+fn apply_parse_config<'a>(
     conn: &mut MysqlConnection,
     log_header: &LogHeader,
-    decoded_log_cow: &Cow<'_, str>,
+    decoded_log_cow: &Cow<'a, str>,
     subsys_log_parser_config: log_resolver_rs::models::SubsysLogParser,
-) -> Result<(), anyhow::Error> {
+) -> anyhow::Result<Vec<Log<'a>>> {
     let parser_rule_id = subsys_log_parser_config.log_parser_rule_id;
     // let log_parser_rule = log_parser_rule_dao::query_by_id(conn, parser_rule_id).unwrap();
     let log_parser_pattern_list =
@@ -178,30 +182,35 @@ fn apply_parse_config(
                 // let mut attr = log.log_header.attr;
 
                 pattern.capture_names().flatten().for_each(|group_name| {
-                    let log_parser_field =
+                    let group_value = captures.name(group_name).unwrap();
+                    if let Some(log_parser_field) =
                         log_parser_field_dao::query_by_log_parser_rule_id_and_name_in_capture(
                             conn,
                             parser_rule_id,
                             group_name,
                         )
-                        .unwrap();
-
-                    let group_value = captures.name(group_name).unwrap();
-                    match log_parser_field.type_ {
-                        10 => {
-                            chrono::DateTime::parse_from_str(
-                                group_value.as_str(),
-                                log_parser_field.format_pattern.unwrap().as_str(),
-                            )
-                            .map(|dt| log.date_time = dt.into())
-                            .ok();
+                    {
+                        match log_parser_field.type_ {
+                            10 => {
+                                chrono::DateTime::parse_from_str(
+                                    group_value.as_str(),
+                                    log_parser_field.format_pattern.unwrap().as_str(),
+                                )
+                                .map(|dt| log.date_time = dt.into())
+                                .ok();
+                            }
+                            0 => {
+                                log.log_header.attr.insert(
+                                    group_name.to_string(),
+                                    group_value.as_str().to_string(),
+                                );
+                            }
+                            _ => log::warn!("unsupported group type"),
                         }
-                        0 => {
-                            log.log_header
-                                .attr
-                                .insert(group_name.to_string(), group_value.as_str().to_string());
-                        }
-                        _ => log::warn!("unsupported group type"),
+                    } else {
+                        log.log_header
+                            .attr
+                            .insert(group_name.to_string(), group_value.as_str().to_string());
                     }
                 });
 
@@ -210,7 +219,7 @@ fn apply_parse_config(
         })
         .collect();
     log::info!("{:?}", subsys_log_parser_config);
-    Ok(())
+    Ok(logs)
 }
 
 fn get_subsys_code(headers: &HashMap<String, String>) -> Option<String> {
